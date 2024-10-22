@@ -135,8 +135,9 @@ app.post('/twilio-webhook', (req: Request, res: Response) => {
         action: '/process-recording',
         method: 'POST',
         maxLength: 30,
-        playBeep: true,
+        playBeep: false,
         trim: 'do-not-trim',
+        timeout: 2,
       });
 
       res.type('text/xml');
@@ -233,8 +234,9 @@ app.post('/process-recording', async (req: Request, res: Response) => {
         action: '/process-recording',
         method: 'POST',
         maxLength: 30,
-        playBeep: true,
+        playBeep: false,
         trim: 'do-not-trim',
+        timeout: 2,
       });
 
       res.type('text/xml');
