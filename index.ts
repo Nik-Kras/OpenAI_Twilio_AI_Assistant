@@ -86,6 +86,7 @@ AI: «Зрозуміло. Я запишу ваш запит на 1000 глянц
 AI: «Нема за що! Ваше замовлення записано, і ми негайно приступимо до нього. Гарного дня!»
 `;
 
+// Handle incoming Twilio webhook
 app.post('/twilio-webhook', (req: Request, res: Response) => {
   const twiml = new twilio.twiml.VoiceResponse();
   const callSid = req.body.CallSid;
@@ -258,80 +259,59 @@ app.post('/process-recording', async (req: Request, res: Response) => {
   }
 });
 
-// // Function to download the recording from Twilio using the correct recording SID
-// const downloadRecording = async (recordingUrl: string, filePath: string): Promise<string> => {
-//   try {
-//     // Extract the recording SID from the recording URL (e.g., https://api.twilio.com/2010-04-01/Accounts/.../Recordings/RExxxxxxxxxxxxxxxxxxxxxxxx)
-//     const recordingSid = path.basename(recordingUrl); // This extracts "RExxxxxxxxxxxxxxxxxxxxxxxx" from the URL
-//     console.log("Sid")
-//     console.log(recordingUrl)
-//     console.log(recordingSid)
-
-//     const recording = await twilioClient.recordings(recordingSid).fetch();
-//     const recordingUri = `${recording.uri}.mp3`; // Get recording URI in MP3 format
-
-//     // Use axios to download the recording
-//     const response = await axios({
-//       url: `https://api.twilio.com${recordingUri}`,
-//       method: 'GET',
-//       responseType: 'stream',
-//       auth: {
-//         username: accountSid,
-//         password: authToken,
-//       },
-//     });
-
-//     // Save the recording to a file
-//     const writer = fs.createWriteStream(filePath);
-//     response.data.pipe(writer);
-
-//     return new Promise((resolve, reject) => {
-//       writer.on('finish', () => {
-//         console.log('Recording downloaded successfully!');
-//         resolve(filePath);
-//       });
-
-//       writer.on('error', (err) => {
-//         console.error('Error downloading the recording:', err);
-//         reject(err);
-//       });
-//     });
-//   } catch (error) {
-//     console.error('Failed to download the recording:', error);
-//     throw error;
-//   }
-// };
-
 // Function to add a sleep/delay for the given duration in milliseconds
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForTwilioRecording(url: string, retries: number = 20, interval: number = 100): Promise<boolean> {
+  for (let i = 0; i < retries; i++) {
+    try {
+      // Send a HEAD request to check if the file exists without downloading it
+      const response = await axios.head(url, {
+        auth: {
+          username: accountSid,
+          password: authToken,
+        },
+      });
+
+      if (response.status === 200) {
+        console.log(`Recording is available at: ${url}`);
+        return true;
+      }
+    } catch (error) {
+      console.log(`Recording not yet available, retrying (${i + 1}/${retries})...`);
+    }
+
+    // Wait for the specified interval before retrying
+    await sleep(interval);
+  }
+
+  console.error(`Recording not available after ${retries} retries.`);
+  return false;
+}
 
 // Function to download the recording file
 async function downloadTwilioRecording(url: string, filePath: string) {
   try {
-    // Use axios to send a GET request with basic authentication
-    await sleep(5000);
-    // Make a request to Twilio to get the composition media
-    const compResponse = await twilioClient.request({
-      method: 'get',
-      uri: url,
-    });
-    console.log(compResponse)
+    // Wait for the recording to become available
+    const recordingAvailable = await waitForTwilioRecording(url);
+
+    if (!recordingAvailable) {
+      throw new Error('Recording is not available.');
+    }
 
     const response = await axios({
       url: url,
       method: 'GET',
-      responseType: 'stream', // Ensures the response is a stream for downloading the file
+      responseType: 'stream',
       auth: {
         username: accountSid,
         password: authToken,
       },
     });
 
-    // Create a write stream to save the file
     const writer = fs.createWriteStream(filePath);
     response.data.pipe(writer);
 
-    // Return a promise that resolves when the file is written
     return new Promise<void>((resolve, reject) => {
       writer.on('finish', () => {
         console.log('Recording downloaded successfully to:', filePath);
@@ -354,27 +334,30 @@ async function transcribeWithWhisper(recordingUrl: string): Promise<string> {
   const filePath = path.join(__dirname, 'recording.mp3');
 
   // Step 1: Download the Twilio recording
-  const downloadedFilePath = await downloadTwilioRecording(recordingUrl, filePath);
-  console.log(downloadTwilioRecording)
+  await downloadTwilioRecording(recordingUrl, filePath);
   console.log(`Recording downloaded at: ${filePath}`);
 
-  // Step 2: Read the audio file into a buffer
-  const audioBuffer = fs.readFileSync(filePath);
-  const file = new File([audioBuffer], "recording.mp3", { type: 'audio/mpeg' });
+  // Step 2: Create a FormData to send the file to OpenAI Whisper API
+  const form = new FormData();
+  form.append('file', fs.createReadStream(filePath));
+  form.append('model', 'whisper-1');
+  form.append('language', 'uk');
 
-  console.log("Sending audio file to Whisper API for transcription...");
+  // Step 3: Transcribe with Whisper
+  const transcription = await axios.post(
+    'https://api.openai.com/v1/audio/transcriptions',
+    form,
+    {
+      headers: {
+        Authorization: `Bearer ${openaiApiKey}`,
+        ...form.getHeaders(),
+      },
+    }
+  );
 
-  // Step 3: Send the file to OpenAI's Whisper API for transcription
-  const transcription = await openai.audio.transcriptions.create({
-    file,
-    model: "whisper-1",
-    language: 'uk', // Specify language, adjust if necessary
-  });
-
-  console.log(`Transcription received: ${transcription.text}`);
-  return transcription.text;
+  console.log(`Transcription received: ${transcription.data.text}`);
+  return transcription.data.text;
 }
-
 
 // Route to handle call status callbacks
 app.post('/call-status', (req: Request, res: Response) => {
